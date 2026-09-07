@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>SIMANISKU - Kamera Absensi</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:Arial,sans-serif;background:#0f172a;color:#fff}
+body{min-height:100vh;display:flex;justify-content:center;align-items:center;padding:16px}
+.app{width:100%;max-width:520px;background:#fff;color:#0f172a;border-radius:22px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.header{background:#0f172a;color:#fff;padding:18px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.header h1{margin:0;font-size:18px}.header small{display:block;margin-top:4px;color:#cbd5e1}
+.badge{background:#2563eb;color:#fff;padding:7px 10px;border-radius:999px;font-size:11px;font-weight:700}
+.content{padding:16px}.camera{position:relative;width:100%;aspect-ratio:3/4;background:#020617;border-radius:16px;overflow:hidden}
+video,#preview{width:100%;height:100%;object-fit:cover;display:block}video.mirror{transform:scaleX(-1)}#preview{display:none}
+.guide{position:absolute;inset:8% 13%;border:2px solid rgba(255,255,255,.8);border-radius:48%;pointer-events:none;box-shadow:0 0 0 999px rgba(0,0,0,.16)}
+.camera-status{position:absolute;left:12px;right:12px;bottom:12px;padding:9px 11px;background:rgba(15,23,42,.78);color:#fff;border-radius:10px;font-size:12px;text-align:center}
+.status{margin-top:12px;padding:12px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0;font-size:13px;line-height:1.45}
+.status.ok{background:#ecfdf5;border-color:#a7f3d0;color:#065f46}.status.warn{background:#fffbeb;border-color:#fde68a;color:#92400e}.status.err{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+.gps-line{display:flex;justify-content:space-between;gap:10px}.gps-line+.gps-line{margin-top:5px}.label{color:#64748b}.value{font-weight:700;text-align:right}
+.buttons{display:grid;grid-template-columns:1fr;gap:10px;margin-top:14px}
+button{border:0;border-radius:12px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}
+.primary{background:#2563eb;color:#fff}.success{background:#059669;color:#fff}.secondary{background:#e2e8f0;color:#334155}.danger{background:#dc2626;color:#fff}
+.hidden{display:none!important}.note{margin-top:12px;color:#64748b;font-size:11px;text-align:center;line-height:1.5}
+.spinner{display:inline-block;width:15px;height:15px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-3px;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <div><h1 id="title">Absen</h1><small>SIMANISKU • Kamera & GPS</small></div>
+    <div class="badge" id="typeBadge">MASUK</div>
+  </div>
+  <div class="content">
+    <div class="camera">
+      <video id="video" autoplay playsinline muted class="mirror"></video>
+      <img id="preview" alt="Preview selfie">
+      <div class="guide"></div>
+      <div class="camera-status" id="cameraStatus">Tekan "Aktifkan Kamera & GPS".</div>
+    </div>
+
+    <div class="status warn" id="gpsStatus">
+      <div class="gps-line"><span class="label">GPS</span><span class="value" id="gpsText">Belum aktif</span></div>
+      <div class="gps-line"><span class="label">Akurasi</span><span class="value" id="accuracyText">-</span></div>
+    </div>
+
+    <div class="buttons">
+      <button id="btnStart" class="primary" onclick="startAll()">Aktifkan Kamera & GPS</button>
+      <button id="btnCapture" class="primary hidden" onclick="capturePhoto()" disabled>📸 Ambil Foto</button>
+      <button id="btnRetake" class="secondary hidden" onclick="retakePhoto()">↻ Ambil Ulang</button>
+      <button id="btnSend" class="success hidden" onclick="sendResult()" disabled>✓ Kirim Absen</button>
+      <button id="btnClose" class="danger" onclick="closeCamera()">Tutup</button>
+    </div>
+
+    <div class="note">
+      Kamera dan GPS berjalan pada halaman HTTPS eksternal. Akurasi GPS yang diterima sistem maksimal 100 meter.
+    </div>
+  </div>
+</div>
+<canvas id="canvas" class="hidden"></canvas>
+
+<script>
+const params=new URLSearchParams(location.search);
+const type=(params.get('type')||'MASUK').toUpperCase()==='PULANG'?'PULANG':'MASUK';
+const nonce=params.get('nonce')||'';
+const returnOrigin=params.get('returnOrigin')||'*';
+let stream=null,watchId=null,sending=false,photoBase64=null;
+let gps={latitude:null,longitude:null,accuracy:null};
+
+document.getElementById('title').textContent='Absen '+(type==='MASUK'?'Masuk':'Pulang');
+document.getElementById('typeBadge').textContent=type;
+
+function setCameraStatus(t){document.getElementById('cameraStatus').textContent=t}
+function setGPSStatus(t,c){const b=document.getElementById('gpsStatus');b.className='status '+(c||'warn');document.getElementById('gpsText').textContent=t}
+function stopCamera(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}}
+function stopGPS(){if(watchId!==null&&navigator.geolocation){navigator.geolocation.clearWatch(watchId);watchId=null}}
+
+async function startCamera(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Kamera tidak tersedia di browser ini.');
+  setCameraStatus('Meminta izin kamera...');
+  stream=await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:720}},audio:false
+  });
+  const v=document.getElementById('video');v.srcObject=stream;await v.play();
+  setCameraStatus('Kamera aktif • arahkan wajah ke dalam bingkai.');
+  document.getElementById('btnCapture').classList.remove('hidden');
+}
+
+function startGPS(){
+  if(!navigator.geolocation){setGPSStatus('Geolocation tidak tersedia.','err');return}
+  setGPSStatus('Mencari lokasi GPS...','warn');
+  watchId=navigator.geolocation.watchPosition(p=>{
+    gps={latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:Number(p.coords.accuracy)};
+    const acc=Math.round(gps.accuracy);
+    document.getElementById('accuracyText').textContent=acc+' meter';
+    if(gps.accuracy<=100){
+      setGPSStatus('GPS terkunci','ok');
+      document.getElementById('btnCapture').disabled=false;
+    }else{
+      setGPSStatus('GPS ditemukan, akurasi belum cukup','warn');
+      document.getElementById('btnCapture').disabled=true;
+    }
+  },e=>{
+    let m='GPS gagal';
+    if(e.code===1)m='Izin lokasi ditolak';
+    if(e.code===2)m='Lokasi tidak tersedia';
+    if(e.code===3)m='Waktu pencarian GPS habis';
+    setGPSStatus(m,'err');
+  },{enableHighAccuracy:true,maximumAge:0,timeout:20000});
+}
+
+async function startAll(){
+  const b=document.getElementById('btnStart');b.disabled=true;
+  try{startGPS();await startCamera();b.classList.add('hidden')}
+  catch(e){setCameraStatus('Kamera gagal: '+(e.message||'izin ditolak'));b.disabled=false}
+}
+
+function capturePhoto(){
+  const v=document.getElementById('video');
+  if(!gps.latitude||!gps.longitude||!Number.isFinite(gps.accuracy)||gps.accuracy>100){
+    alert('GPS belum siap atau akurasi masih lebih dari 100 meter.');return
+  }
+  if(!v.videoWidth||!v.videoHeight){alert('Kamera belum siap.');return}
+  const c=document.getElementById('canvas'),maxWidth=900,scale=Math.min(1,maxWidth/v.videoWidth);
+  c.width=Math.round(v.videoWidth*scale);c.height=Math.round(v.videoHeight*scale);
+  const x=c.getContext('2d');x.save();x.translate(c.width,0);x.scale(-1,1);x.drawImage(v,0,0,c.width,c.height);x.restore();
+  photoBase64=c.toDataURL('image/jpeg',.72);
+  document.getElementById('preview').src=photoBase64;document.getElementById('preview').style.display='block';v.style.display='none';
+  stopCamera();
+  document.getElementById('btnCapture').classList.add('hidden');
+  document.getElementById('btnRetake').classList.remove('hidden');
+  document.getElementById('btnSend').classList.remove('hidden');
+  document.getElementById('btnSend').disabled=false;
+  setCameraStatus('Foto siap dikirim • GPS '+Math.round(gps.accuracy)+' meter');
+}
+
+function retakePhoto(){
+  photoBase64=null;document.getElementById('preview').style.display='none';
+  const v=document.getElementById('video');v.style.display='block';
+  document.getElementById('btnRetake').classList.add('hidden');
+  document.getElementById('btnSend').classList.add('hidden');
+  document.getElementById('btnCapture').classList.remove('hidden');
+  document.getElementById('btnCapture').disabled=!(gps.accuracy<=100);
+  startCamera().catch(()=>{});
+}
+
+function sendResult(){
+  if(sending)return;
+  if(!nonce){alert('Sesi kamera tidak valid. Buka kamera dari aplikasi lagi.');return}
+  if(!photoBase64){alert('Foto selfie belum diambil.');return}
+  if(!gps.latitude||!gps.longitude||!Number.isFinite(gps.accuracy)||gps.accuracy>100){alert('GPS belum memenuhi syarat.');return}
+  if(!window.opener||window.opener.closed){alert('Aplikasi utama sudah tertutup.');return}
+
+  sending=true;
+  document.getElementById('btnSend').disabled=true;
+  document.getElementById('btnSend').innerHTML='<span class="spinner"></span>Mengirim...';
+
+  const message={
+    action:'SIMANISKU_ABSEN_RESULT',
+    nonce:nonce,
+    type:type,
+    payload:{
+      latitude:gps.latitude,
+      longitude:gps.longitude,
+      accuracy:gps.accuracy,
+      foto_base64:photoBase64
+    }
+  };
+
+  try{
+    window.opener.postMessage(message,returnOrigin||'*');
+    setCameraStatus('Data dikirim ke SIMANISKU. Menunggu penyimpanan...');
+    setTimeout(()=>window.close(),900);
+  }catch(e){
+    sending=false;document.getElementById('btnSend').disabled=false;document.getElementById('btnSend').textContent='✓ Kirim Absen';
+    alert('Gagal mengirim data: '+e.message);
+  }
+}
+
+function closeCamera(){stopCamera();stopGPS();window.close()}
+window.addEventListener('beforeunload',()=>{stopCamera();stopGPS()});
+</script>
+</body>
+</html>
