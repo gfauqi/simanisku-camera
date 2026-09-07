@@ -145,18 +145,8 @@ function retakePhoto(){
   startCamera().catch(()=>{});
 }
 
-function sendResult(){
-  if(sending)return;
-  if(!nonce){alert('Sesi kamera tidak valid. Buka kamera dari aplikasi lagi.');return}
-  if(!photoBase64){alert('Foto selfie belum diambil.');return}
-  if(!gps.latitude||!gps.longitude||!Number.isFinite(gps.accuracy)||gps.accuracy>100){alert('GPS belum memenuhi syarat.');return}
-  if(!window.opener||window.opener.closed){alert('Aplikasi utama sudah tertutup.');return}
-
-  sending=true;
-  document.getElementById('btnSend').disabled=true;
-  document.getElementById('btnSend').innerHTML='<span class="spinner"></span>Mengirim...';
-
-  const message={
+function buildResultMessage(){
+  return {
     action:'SIMANISKU_ABSEN_RESULT',
     nonce:nonce,
     type:type,
@@ -167,19 +157,68 @@ function sendResult(){
       foto_base64:photoBase64
     }
   };
+}
 
+function sendResult(){
+  if(sending)return;
+  if(!nonce){alert('Sesi kamera tidak valid. Buka kamera dari aplikasi lagi.');return}
+  if(!photoBase64){alert('Foto selfie belum diambil.');return}
+  if(!gps.latitude||!gps.longitude||!Number.isFinite(gps.accuracy)||gps.accuracy>100){
+    alert('GPS belum memenuhi syarat.');return
+  }
+
+  sending=true;
+  document.getElementById('btnSend').disabled=true;
+  document.getElementById('btnSend').innerHTML='<span class="spinner"></span>Mengirim...';
+
+  const message=buildResultMessage();
+  let delivered=false;
+
+  // Desktop / mobile popup.
   try{
-    window.opener.postMessage(message,returnOrigin||'*');
+    if(window.opener && !window.opener.closed){
+      window.opener.postMessage(message,returnOrigin||'*');
+      delivered=true;
+    }
+  }catch(e){}
+
+  if(delivered){
     setCameraStatus('Data dikirim ke SIMANISKU. Menunggu penyimpanan...');
     setTimeout(()=>window.close(),900);
-  }catch(e){
-    sending=false;document.getElementById('btnSend').disabled=false;document.getElementById('btnSend').textContent='✓ Kirim Absen';
-    alert('Gagal mengirim data: '+e.message);
+    return;
+  }
+
+  // Mobile same-tab fallback.
+  try{
+    sessionStorage.setItem('SIMANISKU_ABSEN_RESULT',JSON.stringify(message));
+  }catch(e){}
+
+  if(returnOrigin && returnOrigin!=='*' && /^https?:\/\//i.test(returnOrigin)){
+    setCameraStatus('Data selfie + GPS siap. Kembali ke SIMANISKU...');
+    setTimeout(()=>{
+      location.href=returnOrigin;
+    },500);
+  }else{
+    sending=false;
+    document.getElementById('btnSend').disabled=false;
+    document.getElementById('btnSend').textContent='✓ Kirim Absen';
+    alert('Data siap, tetapi alamat kembali ke SIMANISKU tidak tersedia.');
   }
 }
 
-function closeCamera(){stopCamera();stopGPS();window.close()}
-window.addEventListener('beforeunload',()=>{stopCamera();stopGPS()});
+function closeCamera(){
+  stopCamera();
+  stopGPS();
+  try{
+    if(window.opener && !window.opener.closed){
+      window.close();
+      return;
+    }
+  }catch(e){}
+  if(returnOrigin && returnOrigin!=='*' && /^https?:\/\//i.test(returnOrigin)){
+    location.href=returnOrigin;
+  }
+}
 </script>
 </body>
 </html>
