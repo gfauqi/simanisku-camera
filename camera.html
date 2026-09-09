@@ -63,7 +63,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       </div>
 
       <div class="note">
-        Kamera harus dibuka pada halaman HTTPS eksternal. GPS yang diterima sistem maksimal 1000 meter. Kamera harus dibuka langsung di halaman GitHub Pages.
+        Kompatibel dengan browser modern yang mendukung Camera + GPS (Chrome, Safari, Edge, Firefox, Samsung Internet). Gunakan HTTPS dan izinkan Camera + Location. Akurasi GPS maksimal 1000 meter.
       </div>
     </div>
   </div>
@@ -71,250 +71,392 @@ button:disabled{opacity:.45;cursor:not-allowed}
 <canvas id="canvas" class="hidden"></canvas>
 
 <script>
-const params=new URLSearchParams(location.search);
-const type=String(params.get("type")||"MASUK").toUpperCase()==="PULANG"?"PULANG":"MASUK";
-const cameraToken=String(params.get("camera_token")||"").trim();
-const DEFAULT_API_URL="https://script.google.com/macros/s/AKfycby_9M_FkA1-bWQASLW-WQ65uR8FQs-apRC9eryEYFNcBcDAF2xOEc75HlCAdUvYbLfG/exec";
-const apiUrl=String(params.get("api_url")||DEFAULT_API_URL).trim();
+"use strict";
 
-let stream=null,watchId=null,sending=false,photoBase64=null,started=false;
-let gps={latitude:null,longitude:null,accuracy:null};
+const params = new URLSearchParams(location.search);
+const type = String(params.get("type") || "MASUK").toUpperCase() === "PULANG" ? "PULANG" : "MASUK";
+const cameraToken = String(params.get("camera_token") || "").trim();
+const DEFAULT_API_URL = "https://script.google.com/macros/s/AKfycby_9M_FkA1-bWQASLW-WQ65uR8FQs-apRC9eryEYFNcBcDAF2xOEc75HlCAdUvYbLfG/exec";
+const apiUrl = String(params.get("api_url") || DEFAULT_API_URL).trim();
+const MAX_GPS_ACCURACY = 1000;
 
-document.getElementById("title").textContent="Absen "+(type==="MASUK"?"Masuk":"Pulang");
-document.getElementById("typeBadge").textContent=type;
+let stream = null;
+let watchId = null;
+let sending = false;
+let photoBase64 = null;
+let gps = {latitude:null, longitude:null, accuracy:null};
+let cameraReady = false;
+let gpsPermissionDenied = false;
 
-function setCameraStatus(t){document.getElementById("cameraStatus").textContent=t}
-function setGPSStatus(t,c){
-  const b=document.getElementById("gpsStatus");
-  b.className="status "+(c||"warn");
-  document.getElementById("gpsText").textContent=t;
+const $ = id => document.getElementById(id);
+
+$("title").textContent = "Absen " + (type === "MASUK" ? "Masuk" : "Pulang");
+$("typeBadge").textContent = type;
+
+function setCameraStatus(text, cls) {
+  const el = $("cameraStatus");
+  el.textContent = text;
+  el.style.background = cls === "err" ? "rgba(127,29,29,.92)" : "rgba(15,23,42,.82)";
 }
-function stopCamera(){
-  if(stream){try{stream.getTracks().forEach(t=>t.stop())}catch(e){}stream=null}
+function setGPSStatus(text, cls) {
+  const el = $("gpsStatus");
+  el.className = "status " + (cls || "warn");
+  $("gpsText").textContent = text;
 }
-function stopGPS(){
-  if(watchId!==null&&navigator.geolocation){
-    try{navigator.geolocation.clearWatch(watchId)}catch(e){}
-    watchId=null;
+function stopCamera() {
+  if (stream) {
+    stream.getTracks().forEach(t => { try { t.stop(); } catch(e) {} });
+    stream = null;
+  }
+  cameraReady = false;
+}
+function stopGPS() {
+  if (watchId !== null && navigator.geolocation) {
+    try { navigator.geolocation.clearWatch(watchId); } catch(e) {}
+    watchId = null;
   }
 }
-function gpsReady(){
-  return Number.isFinite(Number(gps.latitude)) &&
-         Number.isFinite(Number(gps.longitude)) &&
-         Number.isFinite(Number(gps.accuracy)) &&
-         Number(gps.accuracy)<=1000;
+function gpsReady() {
+  return Number.isFinite(gps.latitude) &&
+         Number.isFinite(gps.longitude) &&
+         Number.isFinite(gps.accuracy) &&
+         gps.accuracy >= 0 &&
+         gps.accuracy <= MAX_GPS_ACCURACY;
 }
-function updateCaptureButton(){
-  const b=document.getElementById("btnCapture");
-  if(b)b.disabled=!gpsReady()||!stream||!!photoBase64;
+function updateCaptureButton() {
+  $("btnCapture").disabled = !(cameraReady && gpsReady() && !photoBase64);
 }
-function showInvalid(msg){
-  document.getElementById("cameraArea").classList.add("hidden");
-  const box=document.getElementById("invalidBox");
-  box.textContent=msg;
-  box.classList.remove("hidden");
+function showInvalid(message) {
+  $("cameraArea").classList.add("hidden");
+  $("invalidBox").textContent = message;
+  $("invalidBox").classList.remove("hidden");
 }
-function validSession(){
-  if(!cameraToken)return false;
-  try{
-    const u=new URL(apiUrl);
-    return u.protocol==="https:" && /script\.google\.com$/i.test(u.hostname);
-  }catch(e){return false}
+function validSession() {
+  if (!cameraToken) return false;
+  try {
+    const u = new URL(apiUrl);
+    return u.protocol === "https:" && u.hostname === "script.google.com";
+  } catch(e) {
+    return false;
+  }
 }
+function isIOS() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+         (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+function isMobile() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+function showStartButton(message) {
+  const b = $("btnStart");
+  b.classList.remove("hidden");
+  b.disabled = false;
+  b.textContent = "📷 Aktifkan Kamera & GPS";
+  if (message) setCameraStatus(message);
+}
+async function startCamera() {
+  if (!window.isSecureContext) {
+    throw new Error("Kamera membutuhkan HTTPS. Buka halaman kamera dari GitHub Pages HTTPS.");
+  }
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+    throw new Error("Browser ini tidak menyediakan akses kamera untuk halaman web.");
+  }
 
-async function startCamera(){
-  if(!window.isSecureContext)throw new Error("Halaman kamera bukan HTTPS. Buka melalui GitHub Pages HTTPS.");
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("Browser tidak mendukung kamera.");
   setCameraStatus("Meminta izin kamera...");
-  const attempts=[
-    {video:{facingMode:{ideal:"user"},width:{ideal:1280},height:{ideal:720}},audio:false},
-    {video:{facingMode:"user"},audio:false},
+  const constraints = [
+    {video:{facingMode:{exact:"user"},width:{ideal:1280},height:{ideal:720}},audio:false},
+    {video:{facingMode:"user",width:{ideal:1280},height:{ideal:720}},audio:false},
+    {video:{width:{ideal:1280},height:{ideal:720}},audio:false},
     {video:true,audio:false}
   ];
-  let last=null;
-  for(const c of attempts){
-    try{stream=await navigator.mediaDevices.getUserMedia(c);break}
-    catch(e){last=e;stream=null}
+
+  let lastError = null;
+  for (const c of constraints) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(c);
+      break;
+    } catch(e) {
+      lastError = e;
+      stream = null;
+    }
   }
-  if(!stream){
-    let msg="Kamera gagal dibuka.";
-    if(last?.name==="NotAllowedError"||last?.name==="PermissionDeniedError")msg="Izin kamera ditolak. Aktifkan Camera untuk halaman kamera SIMANISKU.";
-    else if(last?.name==="NotFoundError")msg="Kamera tidak ditemukan.";
-    else if(last?.name==="NotReadableError")msg="Kamera sedang digunakan aplikasi lain.";
-    else if(last?.name==="SecurityError")msg="Browser memblokir kamera karena keamanan halaman.";
-    throw new Error(msg);
+
+  if (!stream) {
+    const n = lastError && lastError.name;
+    if (n === "NotAllowedError" || n === "PermissionDeniedError") {
+      throw new Error("Izin kamera ditolak. Izinkan Camera untuk situs GitHub Pages SIMANISKU, lalu tekan tombol aktivasi lagi.");
+    }
+    if (n === "NotFoundError" || n === "DevicesNotFoundError") {
+      throw new Error("Kamera tidak ditemukan pada perangkat.");
+    }
+    if (n === "NotReadableError" || n === "TrackStartError") {
+      throw new Error("Kamera sedang digunakan aplikasi lain. Tutup aplikasi kamera lain lalu coba lagi.");
+    }
+    if (n === "SecurityError") {
+      throw new Error("Browser memblokir kamera karena keamanan halaman.");
+    }
+    throw new Error("Kamera gagal dibuka" + (n ? " (" + n + ")" : "") + ".");
   }
-  const v=document.getElementById("video");
-  v.srcObject=stream;v.muted=true;v.setAttribute("playsinline","");v.setAttribute("autoplay","");
-  try{await v.play()}catch(e){}
+
+  const video = $("video");
+  video.srcObject = stream;
+  video.muted = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.setAttribute("playsinline", "");
+  video.setAttribute("webkit-playsinline", "");
+  video.setAttribute("autoplay", "");
+  video.classList.add("mirror");
+
+  try { await video.play(); } catch(e) {}
+
+  await new Promise(resolve => {
+    if (video.readyState >= 2) return resolve();
+    const done = () => { video.removeEventListener("loadedmetadata", done); resolve(); };
+    video.addEventListener("loadedmetadata", done);
+    setTimeout(resolve, 1500);
+  });
+
+  cameraReady = !!stream;
+  $("btnStart").classList.add("hidden");
+  $("btnCapture").classList.remove("hidden");
   setCameraStatus("Kamera aktif • arahkan wajah ke dalam bingkai.");
-  document.getElementById("btnCapture").classList.remove("hidden");
   updateCaptureButton();
 }
+function startGPS() {
+  if (!navigator.geolocation) {
+    setGPSStatus("Browser tidak mendukung GPS/geolocation.", "err");
+    return;
+  }
+  if (watchId !== null) return;
 
-function startGPS(){
-  if(!navigator.geolocation){setGPSStatus("Geolocation tidak tersedia.","err");return}
-  if(watchId!==null)return;
-  setGPSStatus("Mencari lokasi GPS...","warn");
-  watchId=navigator.geolocation.watchPosition(p=>{
-    gps={latitude:Number(p.coords.latitude),longitude:Number(p.coords.longitude),accuracy:Number(p.coords.accuracy)};
-    document.getElementById("accuracyText").textContent=Math.round(gps.accuracy)+" meter";
-    if(gpsReady())setGPSStatus("GPS terkunci","ok");
-    else setGPSStatus("GPS ditemukan, akurasi belum cukup","warn");
-    updateCaptureButton();
-  },e=>{
-    let m="GPS gagal mendapatkan lokasi.";
-    if(e.code===1)m="Izin lokasi ditolak. Aktifkan Location untuk halaman kamera SIMANISKU.";
-    else if(e.code===2)m="Lokasi tidak tersedia. Pastikan Location/GPS perangkat aktif.";
-    else if(e.code===3)m="Pencarian GPS timeout. Coba lagi.";
-    setGPSStatus(m,"err");
-  },{enableHighAccuracy:true,maximumAge:0,timeout:30000});
+  setGPSStatus("Meminta izin lokasi & mencari GPS...", "warn");
+  watchId = navigator.geolocation.watchPosition(
+    pos => {
+      gps.latitude = Number(pos.coords.latitude);
+      gps.longitude = Number(pos.coords.longitude);
+      gps.accuracy = Number(pos.coords.accuracy);
+
+      $("accuracyText").textContent =
+        Number.isFinite(gps.accuracy) ? Math.round(gps.accuracy) + " meter" : "-";
+
+      if (gpsReady()) {
+        setGPSStatus("GPS terkunci", "ok");
+      } else {
+        setGPSStatus("GPS ditemukan, akurasi belum memenuhi syarat (≤ " + MAX_GPS_ACCURACY + " m)", "warn");
+      }
+      updateCaptureButton();
+    },
+    err => {
+      if (err.code === 1) {
+        gpsPermissionDenied = true;
+        setGPSStatus("Izin lokasi ditolak. Aktifkan Location untuk situs kamera SIMANISKU.", "err");
+      } else if (err.code === 2) {
+        setGPSStatus("Lokasi tidak tersedia. Aktifkan Location/GPS perangkat.", "err");
+      } else if (err.code === 3) {
+        setGPSStatus("GPS timeout. Tetap aktifkan GPS lalu tekan coba lagi.", "err");
+      } else {
+        setGPSStatus("GPS gagal mendapatkan lokasi.", "err");
+      }
+      updateCaptureButton();
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 30000
+    }
+  );
 }
+async function startAll() {
+  if (sending) return;
 
-async function startAll(){
-  if(started && (stream || watchId!==null)) return;
-  const b=document.getElementById("btnStart");
-  b.disabled=true;
-  b.textContent="Mengaktifkan Kamera & GPS...";
-  setCameraStatus("Meminta izin kamera...");
+  $("btnStart").disabled = true;
+  $("btnStart").textContent = "Mengaktifkan...";
 
-  let cameraOk=false;
-  try{
+  let cameraError = null;
+  try {
     await startCamera();
-    cameraOk=true;
-    started=true;
-    b.classList.add("hidden");
-  }catch(e){
-    started=false;
-    setCameraStatus(e.message||"Kamera gagal dibuka.","");
-    b.disabled=false;
-    b.textContent="📷 Aktifkan Kamera & GPS";
+  } catch(e) {
+    cameraError = e;
+    showStartButton(e.message || "Kamera belum dapat diaktifkan.");
   }
 
-  // GPS is independent of camera. Even if camera permission is denied,
-  // continue requesting GPS so the user can see the real GPS accuracy.
-  setTimeout(()=>startGPS(), cameraOk ? 250 : 100);
+  // GPS is intentionally independent from camera permission.
+  startGPS();
 
-  if(cameraOk){
-    // Keep the button hidden while camera is active.
-    b.classList.add("hidden");
+  if (!cameraError && gpsReady()) {
+    setCameraStatus("Kamera & GPS siap.");
+  } else if (!cameraError) {
+    setCameraStatus("Kamera aktif. Menunggu GPS...");
   }
 }
+function capturePhoto() {
+  if (!cameraReady || !stream) {
+    alert("Kamera belum siap.");
+    return;
+  }
+  if (!gpsReady()) {
+    alert("GPS belum siap atau akurasi masih lebih dari " + MAX_GPS_ACCURACY + " meter.");
+    return;
+  }
 
-function capturePhoto(){
-  const v=document.getElementById("video");
-  if(!gpsReady()){alert("GPS belum siap atau akurasi masih lebih dari 1000 meter.");return}
-  if(!v.videoWidth||!v.videoHeight){alert("Kamera belum siap. Tunggu beberapa detik.");return}
-  const c=document.getElementById("canvas"),maxWidth=800,scale=Math.min(1,maxWidth/v.videoWidth);
-  c.width=Math.round(v.videoWidth*scale);c.height=Math.round(v.videoHeight*scale);
-  const x=c.getContext("2d");
-  x.save();x.translate(c.width,0);x.scale(-1,1);x.drawImage(v,0,0,c.width,c.height);x.restore();
-  photoBase64=c.toDataURL("image/jpeg",.65);
-  document.getElementById("preview").src=photoBase64;
-  document.getElementById("preview").style.display="block";
-  v.style.display="none";
+  const video = $("video");
+  if (!video.videoWidth || !video.videoHeight) {
+    alert("Kamera belum siap. Tunggu sebentar.");
+    return;
+  }
+
+  const canvas = $("canvas");
+  const maxWidth = 900;
+  const scale = Math.min(1, maxWidth / video.videoWidth);
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+
+  const ctx = canvas.getContext("2d", {alpha:false});
+  ctx.save();
+  // Preview is mirrored, so save a natural-looking selfie orientation.
+  ctx.translate(canvas.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  photoBase64 = canvas.toDataURL("image/jpeg", 0.72);
+  $("preview").src = photoBase64;
+  $("preview").style.display = "block";
+  video.style.display = "none";
+
   stopCamera();
-  document.getElementById("btnCapture").classList.add("hidden");
-  document.getElementById("btnRetake").classList.remove("hidden");
-  document.getElementById("btnSend").classList.remove("hidden");
-  document.getElementById("btnSend").disabled=false;
-  setCameraStatus("Foto siap dikirim • GPS "+Math.round(gps.accuracy)+" meter");
+
+  $("btnCapture").classList.add("hidden");
+  $("btnRetake").classList.remove("hidden");
+  $("btnSend").classList.remove("hidden");
+  $("btnSend").disabled = false;
+  setCameraStatus("Foto siap • GPS " + Math.round(gps.accuracy) + " meter.");
 }
+async function retakePhoto() {
+  photoBase64 = null;
+  $("preview").style.display = "none";
+  $("video").style.display = "block";
+  $("btnRetake").classList.add("hidden");
+  $("btnSend").classList.add("hidden");
+  $("btnCapture").classList.remove("hidden");
+  $("btnCapture").disabled = true;
 
-async function retakePhoto(){
-  photoBase64=null;
-  document.getElementById("preview").style.display="none";
-  const v=document.getElementById("video");v.style.display="block";
-  document.getElementById("btnRetake").classList.add("hidden");
-  document.getElementById("btnSend").classList.add("hidden");
-  document.getElementById("btnCapture").classList.remove("hidden");
-  document.getElementById("btnCapture").disabled=true;
-  try{await startCamera()}catch(e){setCameraStatus(e.message||"Kamera gagal dibuka.")}
+  try {
+    await startCamera();
+  } catch(e) {
+    showStartButton(e.message || "Kamera gagal dibuka. Tekan aktivasi.");
+  }
 }
+function sendResult() {
+  if (sending) return;
+  if (!validSession()) {
+    alert("Sesi kamera tidak valid. Buka kamera dari tombol Absen di SIMANISKU.");
+    return;
+  }
+  if (!photoBase64) {
+    alert("Ambil foto selfie terlebih dahulu.");
+    return;
+  }
+  if (!gpsReady()) {
+    alert("GPS belum memenuhi syarat akurasi maksimal " + MAX_GPS_ACCURACY + " meter.");
+    return;
+  }
 
-function sendResult(){
-  if(sending)return;
-  if(!validSession()){alert("Sesi kamera tidak valid. Buka kamera dari aplikasi SIMANISKU.");return}
-  if(!photoBase64){alert("Ambil foto selfie terlebih dahulu.");return}
-  if(!gpsReady()){alert("GPS belum memenuhi syarat akurasi maksimal 1000 meter.");return}
+  sending = true;
+  stopCamera();
+  stopGPS();
 
-  sending=true;
-  stopCamera();stopGPS();
-  const btn=document.getElementById("btnSend");
-  btn.disabled=true;
-  btn.innerHTML='<span class="spinner"></span>Mengirim & menyimpan...';
+  const btn = $("btnSend");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Mengirim & menyimpan...';
+  setCameraStatus("Mengirim selfie + GPS ke SIMANISKU...");
 
-  // Normal HTML form POST = no CORS dependency, no cross-window messaging.
-  const form=document.createElement("form");
-  form.method="POST";
-  form.action=apiUrl;
-  form.style.display="none";
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = apiUrl;
+  form.style.display = "none";
 
-  const fields={
-    camera_token:cameraToken,
-    type:type,
-    latitude:String(gps.latitude),
-    longitude:String(gps.longitude),
-    accuracy:String(gps.accuracy),
-    foto_base64:photoBase64
+  const fields = {
+    camera_token: cameraToken,
+    type: type,
+    latitude: String(gps.latitude),
+    longitude: String(gps.longitude),
+    accuracy: String(gps.accuracy),
+    foto_base64: photoBase64
   };
-  Object.keys(fields).forEach(k=>{
-    const input=document.createElement("input");
-    input.type="hidden";input.name=k;input.value=fields[k];
+
+  Object.keys(fields).forEach(name => {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = name;
+    input.value = fields[name];
     form.appendChild(input);
   });
+
   document.body.appendChild(form);
-  setCameraStatus("Mengirim data selfie + GPS ke SIMANISKU...");
   form.submit();
 }
-
-function closeCamera(){
-  stopCamera();stopGPS();
-  // Return through browser history. We deliberately do not accept an
-  // arbitrary return URL from the query string.
-  if(history.length>1){
+function closeCamera() {
+  stopCamera();
+  stopGPS();
+  if (history.length > 1) {
     history.back();
-    return;
+  } else {
+    location.replace("https://gfauqi.github.io/simanisku-camera/");
   }
-  location.replace("https://gfauqi.github.io/simanisku-camera/");
 }
-
-async function showPermissionDiagnostics_(){
-  try{
-    if(navigator.permissions && navigator.permissions.query){
-      try{
-        const p=await navigator.permissions.query({name:"camera"});
-        if(p.state==="denied") setCameraStatus("Izin kamera saat ini DITOLAK. Buka izin situs untuk gfauqi.github.io lalu pilih Allow/Izinkan.","err");
-      }catch(e){}
-      try{
-        const p=await navigator.permissions.query({name:"geolocation"});
-        if(p.state==="denied") setGPSStatus("Izin lokasi DITOLAK. Buka izin situs untuk gfauqi.github.io lalu pilih Allow/Izinkan.","err");
-      }catch(e){}
+async function diagnostics() {
+  if (!navigator.permissions || !navigator.permissions.query) return;
+  try {
+    const cameraPermission = await navigator.permissions.query({name:"camera"});
+    if (cameraPermission.state === "denied") {
+      setCameraStatus("Izin Camera ditolak untuk situs ini. Buka Site settings → Camera → Allow.", "err");
     }
-  }catch(e){}
+  } catch(e) {}
+  try {
+    const locationPermission = await navigator.permissions.query({name:"geolocation"});
+    if (locationPermission.state === "denied") {
+      setGPSStatus("Izin Location ditolak. Buka Site settings → Location → Allow.", "err");
+    }
+  } catch(e) {}
 }
-
-function autoStartCameraAndGps_(){
-  if(!validSession()){
-    setCameraStatus("Sesi kamera tidak valid. Buka absensi dari aplikasi SIMANISKU.");
+function bootstrap() {
+  if (!validSession()) {
+    showInvalid("Sesi kamera tidak valid atau sudah tidak tersedia. Kembali ke SIMANISKU dan tekan Absen " + (type === "MASUK" ? "Masuk" : "Pulang") + " lagi.");
     return;
   }
-  if(window.top!==window.self){
-    setCameraStatus("Halaman kamera harus dibuka langsung, bukan di dalam iframe Google Sites.","err");
+
+  if (!window.isSecureContext) {
+    showInvalid("Halaman kamera harus dibuka melalui HTTPS.");
     return;
   }
-  showPermissionDiagnostics_();
-  if(started && (stream || watchId!==null))return;
-  // Direct top-level HTTPS page: request camera automatically on page load.
-  // GPS is requested independently if camera permission is denied.
-  setTimeout(()=>startAll(),250);
-}
 
-window.addEventListener("load",autoStartCameraAndGps_);
-window.addEventListener("pageshow",()=>{
-  if(!started || !stream) setTimeout(()=>autoStartCameraAndGps_(),350);
+  diagnostics();
+
+  // Browser-independent: try automatically. If the browser/OS requires a
+  // user gesture, the button remains visible and one tap retries permission.
+  setTimeout(() => startAll(), 300);
+}
+window.addEventListener("load", bootstrap);
+window.addEventListener("pageshow", () => {
+  if (!cameraReady && !sending) setTimeout(() => diagnostics(), 250);
 });
-window.addEventListener("pagehide",()=>{stopCamera();stopGPS()});
+window.addEventListener("pagehide", () => {
+  stopCamera();
+  stopGPS();
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !sending) {
+    diagnostics();
+    if (!cameraReady && !photoBase64) {
+      setTimeout(() => {
+        // Do not spam permission dialogs; user can press the button if needed.
+        updateCaptureButton();
+      }, 250);
+    }
+  }
+});
 </script>
 </body>
 </html>
