@@ -63,7 +63,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       </div>
 
       <div class="note">
-        Kamera harus dibuka pada halaman HTTPS eksternal. GPS yang diterima sistem maksimal 1000 meter.
+        Kamera harus dibuka pada halaman HTTPS eksternal. GPS yang diterima sistem maksimal 1000 meter. Kamera harus dibuka langsung di halaman GitHub Pages.
       </div>
     </div>
   </div>
@@ -74,18 +74,8 @@ button:disabled{opacity:.45;cursor:not-allowed}
 const params=new URLSearchParams(location.search);
 const type=String(params.get("type")||"MASUK").toUpperCase()==="PULANG"?"PULANG":"MASUK";
 const cameraToken=String(params.get("camera_token")||"").trim();
-const apiUrl=String(params.get("api_url")||"").trim();
-
-// IMPORTANT:
-// If camera.html is ever opened inside Google Sites (or another iframe),
-// escape to the TOP-LEVEL browser window first. Camera and GPS permissions
-// must belong to the actual GitHub Pages origin, not sites.google.com.
-let topFrameEscapeNeeded=(window.top!==window.self);
-if(topFrameEscapeNeeded){
-  try{
-    window.top.location.replace(location.href);
-  }catch(e){}
-}
+const DEFAULT_API_URL="https://script.google.com/macros/s/AKfycby_9M_FkA1-bWQASLW-WQ65uR8FQs-apRC9eryEYFNcBcDAF2xOEc75HlCAdUvYbLfG/exec";
+const apiUrl=String(params.get("api_url")||DEFAULT_API_URL).trim();
 
 let stream=null,watchId=null,sending=false,photoBase64=null,started=false;
 let gps={latitude:null,longitude:null,accuracy:null};
@@ -126,8 +116,10 @@ function showInvalid(msg){
 }
 function validSession(){
   if(!cameraToken)return false;
-  if(!apiUrl)return false;
-  try{return new URL(apiUrl).protocol==="https:"}catch(e){return false}
+  try{
+    const u=new URL(apiUrl);
+    return u.protocol==="https:" && /script\.google\.com$/i.test(u.hostname);
+  }catch(e){return false}
 }
 
 async function startCamera(){
@@ -180,32 +172,32 @@ function startGPS(){
 }
 
 async function startAll(){
-  if(started&&stream)return;
+  if(started && (stream || watchId!==null)) return;
   const b=document.getElementById("btnStart");
   b.disabled=true;
-  b.textContent="Mengaktifkan kamera...";
+  b.textContent="Mengaktifkan Kamera & GPS...";
   setCameraStatus("Meminta izin kamera...");
 
-  // Camera first. On mobile browsers this gives the permission prompt priority.
+  let cameraOk=false;
   try{
     await startCamera();
+    cameraOk=true;
     started=true;
     b.classList.add("hidden");
-
-    // Start GPS after camera is active so camera + location permission prompts
-    // are not requested at exactly the same instant.
-    setTimeout(()=>startGPS(),250);
   }catch(e){
-    setGPSStatus("Menunggu izin kamera...","warn");
-    setCameraStatus(e.message||"Kamera gagal dibuka.");
+    started=false;
+    setCameraStatus(e.message||"Kamera gagal dibuka.","");
     b.disabled=false;
     b.textContent="📷 Aktifkan Kamera & GPS";
+  }
 
-    // Some mobile browsers need a short retry after the page becomes fully active.
-    if(e?.name!=="NotAllowedError" && !window.__cameraRetry){
-      window.__cameraRetry=true;
-      setTimeout(()=>startAll(),1200);
-    }
+  // GPS is independent of camera. Even if camera permission is denied,
+  // continue requesting GPS so the user can see the real GPS accuracy.
+  setTimeout(()=>startGPS(), cameraOk ? 250 : 100);
+
+  if(cameraOk){
+    // Keep the button hidden while camera is active.
+    b.classList.add("hidden");
   }
 }
 
@@ -252,7 +244,7 @@ function sendResult(){
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Mengirim & menyimpan...';
 
-  // Normal HTML form POST = no CORS dependency, no opener, no postMessage.
+  // Normal HTML form POST = no CORS dependency, no cross-window messaging.
   const form=document.createElement("form");
   form.method="POST";
   form.action=apiUrl;
@@ -287,12 +279,35 @@ function closeCamera(){
   location.replace("https://gfauqi.github.io/simanisku-camera/");
 }
 
+async function showPermissionDiagnostics_(){
+  try{
+    if(navigator.permissions && navigator.permissions.query){
+      try{
+        const p=await navigator.permissions.query({name:"camera"});
+        if(p.state==="denied") setCameraStatus("Izin kamera saat ini DITOLAK. Buka izin situs untuk gfauqi.github.io lalu pilih Allow/Izinkan.","err");
+      }catch(e){}
+      try{
+        const p=await navigator.permissions.query({name:"geolocation"});
+        if(p.state==="denied") setGPSStatus("Izin lokasi DITOLAK. Buka izin situs untuk gfauqi.github.io lalu pilih Allow/Izinkan.","err");
+      }catch(e){}
+    }
+  }catch(e){}
+}
+
 function autoStartCameraAndGps_(){
-  if(!validSession())return;
-  if(started&&stream)return;
-  // Top-level HTTPS page: request permissions automatically. If the browser
-  // requires a user gesture, the Start button remains available.
-  setTimeout(()=>startAll(),180);
+  if(!validSession()){
+    setCameraStatus("Sesi kamera tidak valid. Buka absensi dari aplikasi SIMANISKU.");
+    return;
+  }
+  if(window.top!==window.self){
+    setCameraStatus("Halaman kamera harus dibuka langsung, bukan di dalam iframe Google Sites.","err");
+    return;
+  }
+  showPermissionDiagnostics_();
+  if(started && (stream || watchId!==null))return;
+  // Direct top-level HTTPS page: request camera automatically on page load.
+  // GPS is requested independently if camera permission is denied.
+  setTimeout(()=>startAll(),250);
 }
 
 window.addEventListener("load",autoStartCameraAndGps_);
