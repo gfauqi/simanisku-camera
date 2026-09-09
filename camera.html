@@ -79,9 +79,14 @@ function stopGPS(){if(watchId!==null&&navigator.geolocation){navigator.geolocati
 async function startCamera(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Kamera tidak tersedia di browser ini.');
   setCameraStatus('Meminta izin kamera...');
-  stream=await navigator.mediaDevices.getUserMedia({
-    video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:720}},audio:false
-  });
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'user'},width:{ideal:1280},height:{ideal:720}},audio:false
+    });
+  }catch(firstError){
+    // Fallback untuk browser/HP yang tidak menerima constraint kamera di atas.
+    stream=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+  }
   const v=document.getElementById('video');v.srcObject=stream;await v.play();
   setCameraStatus('Kamera aktif • arahkan wajah ke dalam bingkai.');
   document.getElementById('btnCapture').classList.remove('hidden');
@@ -110,10 +115,44 @@ function startGPS(){
   },{enableHighAccuracy:true,maximumAge:0,timeout:20000});
 }
 
+let autoStarting=false;
+
+async function autoStartAll(){
+  if(autoStarting || stream) return;
+  autoStarting=true;
+  const b=document.getElementById('btnStart');
+  b.disabled=true;
+  b.textContent='Mengaktifkan Kamera & GPS...';
+
+  // GPS dapat diminta langsung saat halaman dibuka.
+  startGPS();
+
+  try{
+    await startCamera();
+    b.classList.add('hidden');
+  }catch(e){
+    setCameraStatus('Kamera belum aktif: '+(e.message||'izin belum diberikan'));
+    b.disabled=false;
+    b.textContent='📷 Aktifkan Kamera';
+    // Beberapa browser mobile hanya mengizinkan kamera setelah sentuhan user.
+  }finally{
+    autoStarting=false;
+  }
+}
+
 async function startAll(){
-  const b=document.getElementById('btnStart');b.disabled=true;
-  try{startGPS();await startCamera();b.classList.add('hidden')}
-  catch(e){setCameraStatus('Kamera gagal: '+(e.message||'izin ditolak'));b.disabled=false}
+  const b=document.getElementById('btnStart');
+  b.disabled=true;
+  b.textContent='Meminta izin kamera...';
+  try{
+    if(watchId===null) startGPS();
+    await startCamera();
+    b.classList.add('hidden');
+  }catch(e){
+    setCameraStatus('Kamera gagal: '+(e.message||'izin ditolak'));
+    b.disabled=false;
+    b.textContent='📷 Aktifkan Kamera';
+  }
 }
 
 function capturePhoto(){
@@ -144,6 +183,12 @@ function retakePhoto(){
   document.getElementById('btnCapture').disabled=!(gps.accuracy<=100);
   startCamera().catch(()=>{});
 }
+
+// Coba aktif otomatis ketika halaman kamera selesai dimuat.
+// Jika browser mobile menolak karena membutuhkan gesture, tombol tetap tersedia.
+window.addEventListener('load',()=>{
+  setTimeout(autoStartAll,350);
+});
 
 function buildResultMessage(){
   return {
