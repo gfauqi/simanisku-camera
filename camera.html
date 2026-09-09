@@ -63,7 +63,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       </div>
 
       <div class="note">
-        Kamera harus dibuka pada halaman HTTPS eksternal. GPS yang diterima sistem maksimal 100 meter.
+        Kamera harus dibuka pada halaman HTTPS eksternal. GPS yang diterima sistem maksimal 1000 meter.
       </div>
     </div>
   </div>
@@ -112,7 +112,7 @@ function gpsReady(){
   return Number.isFinite(Number(gps.latitude)) &&
          Number.isFinite(Number(gps.longitude)) &&
          Number.isFinite(Number(gps.accuracy)) &&
-         Number(gps.accuracy)<=100;
+         Number(gps.accuracy)<=1000;
 }
 function updateCaptureButton(){
   const b=document.getElementById("btnCapture");
@@ -182,21 +182,36 @@ function startGPS(){
 async function startAll(){
   if(started&&stream)return;
   const b=document.getElementById("btnStart");
-  b.disabled=true;b.textContent="Mengaktifkan...";
-  startGPS();
+  b.disabled=true;
+  b.textContent="Mengaktifkan kamera...";
+  setCameraStatus("Meminta izin kamera...");
+
+  // Camera first. On mobile browsers this gives the permission prompt priority.
   try{
     await startCamera();
     started=true;
     b.classList.add("hidden");
+
+    // Start GPS after camera is active so camera + location permission prompts
+    // are not requested at exactly the same instant.
+    setTimeout(()=>startGPS(),250);
   }catch(e){
+    setGPSStatus("Menunggu izin kamera...","warn");
     setCameraStatus(e.message||"Kamera gagal dibuka.");
-    b.disabled=false;b.textContent="📷 Aktifkan Kamera & GPS";
+    b.disabled=false;
+    b.textContent="📷 Aktifkan Kamera & GPS";
+
+    // Some mobile browsers need a short retry after the page becomes fully active.
+    if(e?.name!=="NotAllowedError" && !window.__cameraRetry){
+      window.__cameraRetry=true;
+      setTimeout(()=>startAll(),1200);
+    }
   }
 }
 
 function capturePhoto(){
   const v=document.getElementById("video");
-  if(!gpsReady()){alert("GPS belum siap atau akurasi masih lebih dari 100 meter.");return}
+  if(!gpsReady()){alert("GPS belum siap atau akurasi masih lebih dari 1000 meter.");return}
   if(!v.videoWidth||!v.videoHeight){alert("Kamera belum siap. Tunggu beberapa detik.");return}
   const c=document.getElementById("canvas"),maxWidth=800,scale=Math.min(1,maxWidth/v.videoWidth);
   c.width=Math.round(v.videoWidth*scale);c.height=Math.round(v.videoHeight*scale);
@@ -229,7 +244,7 @@ function sendResult(){
   if(sending)return;
   if(!validSession()){alert("Sesi kamera tidak valid. Buka kamera dari aplikasi SIMANISKU.");return}
   if(!photoBase64){alert("Ambil foto selfie terlebih dahulu.");return}
-  if(!gpsReady()){alert("GPS belum memenuhi syarat akurasi maksimal 100 meter.");return}
+  if(!gpsReady()){alert("GPS belum memenuhi syarat akurasi maksimal 1000 meter.");return}
 
   sending=true;
   stopCamera();stopGPS();
@@ -272,14 +287,17 @@ function closeCamera(){
   location.replace("https://gfauqi.github.io/simanisku-camera/");
 }
 
-window.addEventListener("load",()=>{
-  if(!validSession()){
-    showInvalid("Sesi kamera tidak lengkap. Silakan kembali ke aplikasi SIMANISKU dan tekan tombol Absen lagi.");
-    return;
-  }
-  // Attempt automatic activation; if mobile requires a user gesture,
-  // the visible button remains available.
-  setTimeout(()=>startAll(),250);
+function autoStartCameraAndGps_(){
+  if(!validSession())return;
+  if(started&&stream)return;
+  // Top-level HTTPS page: request permissions automatically. If the browser
+  // requires a user gesture, the Start button remains available.
+  setTimeout(()=>startAll(),180);
+}
+
+window.addEventListener("load",autoStartCameraAndGps_);
+window.addEventListener("pageshow",()=>{
+  if(!started || !stream) setTimeout(()=>autoStartCameraAndGps_(),350);
 });
 window.addEventListener("pagehide",()=>{stopCamera();stopGPS()});
 </script>
