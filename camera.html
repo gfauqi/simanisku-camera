@@ -63,7 +63,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       </div>
 
       <div class="note">
-        Kamera harus dibuka pada halaman HTTPS eksternal. GPS yang diterima sistem maksimal 100 meter.
+        Kamera harus dibuka pada halaman HTTPS eksternal. GPS yang diterima sistem maksimal 150 meter.
       </div>
     </div>
   </div>
@@ -218,7 +218,7 @@ function sendResult(){
   if(sending)return;
   if(!validSession()){alert("Sesi kamera tidak valid. Buka kamera dari aplikasi SIMANISKU.");return}
   if(!photoBase64){alert("Ambil foto selfie terlebih dahulu.");return}
-  if(!gpsReady()){alert("GPS belum memenuhi syarat akurasi maksimal 100 meter.");return}
+  if(!gpsReady()){alert("GPS belum memenuhi syarat akurasi maksimal 150 meter.");return}
 
   sending=true;
   stopCamera();stopGPS();
