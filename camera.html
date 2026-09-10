@@ -101,7 +101,7 @@ function gpsReady(){
   return Number.isFinite(Number(gps.latitude)) &&
          Number.isFinite(Number(gps.longitude)) &&
          Number.isFinite(Number(gps.accuracy)) &&
-         Number(gps.accuracy)<=100;
+         Number(gps.accuracy)<=150;
 }
 function updateCaptureButton(){
   const b=document.getElementById("btnCapture");
@@ -185,7 +185,7 @@ async function startAll(){
 
 function capturePhoto(){
   const v=document.getElementById("video");
-  if(!gpsReady()){alert("GPS belum siap atau akurasi masih lebih dari 100 meter.");return}
+  if(!gpsReady()){alert("GPS belum siap atau akurasi masih lebih dari 150 meter.");return}
   if(!v.videoWidth||!v.videoHeight){alert("Kamera belum siap. Tunggu beberapa detik.");return}
   const c=document.getElementById("canvas"),maxWidth=800,scale=Math.min(1,maxWidth/v.videoWidth);
   c.width=Math.round(v.videoWidth*scale);c.height=Math.round(v.videoHeight*scale);
